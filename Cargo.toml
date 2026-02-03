@@ -1,0 +1,39 @@
+[package]
+name = "exploding-kittens"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# --- Web Framework & Networking ---
+# 'ws' feature is crucial for the multiplayer game loop
+axum = { version = "0.7", features = ["ws"] }
+# The standard async runtime
+tokio = { version = "1", features = ["full"] }
+# Utilities for serving the Preact frontend (fs) and logging (trace)
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+
+# --- Data Serialization ---
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# --- Game Logic Utilities ---
+# For generating unique Room IDs and Player IDs
+uuid = { version = "1.10", features = ["v4", "serde"] }
+# Necessary for shuffling the deck
+rand = "0.8"
+
+# --- Logging ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The new State Machine crate
+statig = "0.3"
+
+# --- Optimization Profile for Raspberry Pi ---
+# These settings significantly reduce binary size and memory footprint.
+[profile.release]
+opt-level = "z"     # Optimize specifically for binary size (z > s)
+lto = true          # Enable Link Time Optimization (slower build, smaller binary)
+codegen-units = 1   # Reduces parallel build for better optimization consistency
+panic = "abort"     # Removes stack unwinding logic (saves considerable space)
+strip = true        # Automatically strip symbols from the binary
