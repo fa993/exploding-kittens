@@ -17,57 +17,77 @@ export function GameBoard({ gameId }: GameBoardProps) {
   const [targetMode, setTargetMode] = useState<'Favor' | 'Pair' | null>(null);
   const [showLogs, setShowLogs] = useState(false);
   const [isActionPending, setIsActionPending] = useState(false);
-
-  // NEW: Countdown State
   const [timeLeft, setTimeLeft] = useState(0);
 
-  // Refs
   const logsContainerRef = useRef<HTMLDivElement>(null);
+  // NEW: Track if the user is currently at the bottom of the logs
+  const isAtBottomRef = useRef(true);
+
   const playerId = sessionStorage.getItem('player_id') || '';
 
-  // --- POLLING & SYNC ---
+  // --- 1. POLLING ---
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const s = await api.getState(gameId, playerId);
-
-        setState(prev => {
-          // DETECT TURN CHANGE -> RESET TIMER
-          // We check if the player index changed OR if the phase object changed (e.g. Turn -> Explosion)
-          if (!prev ||
-            prev.current_player_idx !== s.current_player_idx ||
-            JSON.stringify(prev.phase) !== JSON.stringify(s.phase)) {
-
-            const phaseStr = typeof s.phase === 'string' ? s.phase : Object.keys(s.phase)[0];
-
-            // Sync with Backend Constants
-            if (phaseStr === 'ExplosionPending') setTimeLeft(30);
-            else if (phaseStr === 'PlayerTurn') setTimeLeft(45);
-            else setTimeLeft(0);
-          }
-          return s;
-        });
+        setState(s);
       } catch (e) { console.error("Poll fail", e); }
     }, 1000);
     return () => clearInterval(interval);
   }, [gameId]);
 
-  // --- COUNTDOWN TICKER ---
+  // --- 2. TIME CALCULATION ENGINE ---
   useEffect(() => {
-    if (timeLeft <= 0) return;
-    const timer = setInterval(() => {
-      setTimeLeft(t => t > 0 ? t - 1 : 0);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [timeLeft]);
+    if (!state) return;
 
-  // --- AUTO SCROLL LOGS ---
+    const calculateTimeLeft = () => {
+      const phaseStr = typeof state.phase === 'string' ? state.phase : Object.keys(state.phase)[0];
+
+      let allowedSeconds = 0;
+      if (phaseStr === 'ExplosionPending') allowedSeconds = 30;
+      else if (phaseStr === 'PlayerTurn') allowedSeconds = 45;
+      else {
+        setTimeLeft(0);
+        return;
+      }
+
+      // Elapsed = Current Time - Server Last Move Time
+      const elapsedSeconds = Math.floor((Date.now() - state.last_move_ts) / 1000);
+      const remaining = Math.max(0, allowedSeconds - elapsedSeconds);
+      setTimeLeft(remaining);
+    };
+
+    calculateTimeLeft();
+    const timer = setInterval(calculateTimeLeft, 1000);
+    return () => clearInterval(timer);
+  }, [state?.last_move_ts, state?.phase]);
+
+  // --- 3. SMART LOG SCROLLING ---
+
+  // A. Handle user manual scrolling
+  const handleLogScroll = () => {
+    if (logsContainerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = logsContainerRef.current;
+      // If user is within 50px of the bottom, consider them "at bottom"
+      const isBottom = scrollHeight - scrollTop - clientHeight < 50;
+      isAtBottomRef.current = isBottom;
+    }
+  };
+
+  // B. Auto-scroll when new logs arrive (ONLY if already at bottom)
+  useEffect(() => {
+    if (showLogs && logsContainerRef.current && isAtBottomRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+    }
+  }, [state?.logs]); // Trigger on new logs
+
+  // C. Always reset to bottom when opening the modal
   useEffect(() => {
     if (showLogs && logsContainerRef.current) {
-      const container = logsContainerRef.current;
-      container.scrollTop = container.scrollHeight;
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+      isAtBottomRef.current = true;
     }
-  }, [state?.logs, showLogs]);
+  }, [showLogs]);
 
   const showToast = (msg: string, type: 'info' | 'error' = 'info') => {
     const id = Date.now();
@@ -180,10 +200,8 @@ export function GameBoard({ gameId }: GameBoardProps) {
 
     setIsActionPending(true);
     try {
-      // Calculate random depth on client
       const maxDepth = state.deck_count;
       const randomDepth = Math.floor(Math.random() * (maxDepth + 1));
-
       await api.move(gameId, playerId, {
         event: 'PlayDefuse',
         data: { card_idx: defuseIdx, insert_depth: randomDepth }
@@ -193,7 +211,6 @@ export function GameBoard({ gameId }: GameBoardProps) {
     finally { setIsActionPending(false); }
   };
 
-  // Maps to Backend "TimerExpired" -> Auto-Play Defuse or Die
   const handleAcceptFate = async () => {
     if (isActionPending) return;
     setIsActionPending(true);
@@ -203,7 +220,6 @@ export function GameBoard({ gameId }: GameBoardProps) {
     finally { setIsActionPending(false); }
   };
 
-  // Helper for progress bar color
   const getTimerColor = () => {
     if (timeLeft > 20) return '#22c55e'; // Green
     if (timeLeft > 10) return '#eab308'; // Yellow
@@ -219,7 +235,6 @@ export function GameBoard({ gameId }: GameBoardProps) {
 
       {/* HEADER */}
       <div className="header">
-        {/* Left: Title & Logs */}
         <div style={{ display: 'flex', gap: 15, alignItems: 'center' }}>
           <div style={{ fontWeight: 800, fontSize: '1.2rem', color: '#ef4444' }}>💣 KITTENS</div>
           <button className="log-toggle-btn" onClick={() => setShowLogs(!showLogs)}>
@@ -227,14 +242,14 @@ export function GameBoard({ gameId }: GameBoardProps) {
           </button>
         </div>
 
-        {/* CENTER: Turn + Timer */}
+        {/* CENTER: Turn Badge + Timer */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
           <div className={`turn-badge ${isMyTurn ? 'my-turn' : ''}`}>
             {isMyTurn ? "YOUR TURN" : `${state.players[state.current_player_idx]?.name}'s Turn`}
           </div>
 
-          {/* CHANGE: Only show timer if  moves have happened */}
-          {state.logs?.[state.logs.length - 1].message != 'Game Started!' && (phaseStr === 'PlayerTurn' || phaseStr === 'ExplosionPending') && (
+          {/* Show Timer ONLY if moves have happened and active phase */}
+          {state.logs[state.logs.length - 1]?.message != 'Game Started!' && (phaseStr === 'PlayerTurn' || phaseStr === 'ExplosionPending') && (
             <>
               <div style={{
                 width: '100%', maxWidth: '200px', height: '4px',
@@ -253,7 +268,6 @@ export function GameBoard({ gameId }: GameBoardProps) {
             </>
           )}
 
-          {/* Optional: Indicator for first turn */}
           {state.logs.length <= 1 && isMyTurn && (
             <div style={{ fontSize: '0.7rem', color: '#22c55e', marginTop: 5 }}>
               Start the game when ready!
@@ -261,7 +275,6 @@ export function GameBoard({ gameId }: GameBoardProps) {
           )}
         </div>
 
-        {/* Right: Room ID & Exit */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 15 }}>
           <div style={{ fontSize: '0.9rem', opacity: 0.7 }}>Room: {gameId.slice(0, 4)}</div>
           <div onClick={handleExit} style={{ cursor: 'pointer', color: '#94a3b8', display: 'flex', alignItems: 'center' }} title="Exit">
@@ -270,14 +283,18 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       </div>
 
-      {/* LOGS OVERLAY */}
+      {/* LOGS */}
       {showLogs && (
         <div className="logs-modal">
           <div className="logs-header">
             <span>Audit Logs</span>
             <span style={{ cursor: 'pointer' }} onClick={() => setShowLogs(false)}>✕</span>
           </div>
-          <div className="logs-list" ref={logsContainerRef}>
+          <div
+            className="logs-list"
+            ref={logsContainerRef}
+            onScroll={handleLogScroll} // <-- Added Scroll Listener
+          >
             {state.logs.map((l, i) => (
               <div key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: 4 }}>
                 <span style={{ color: '#64748b', marginRight: 5 }}>[{new Date(l.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}]</span>
@@ -288,7 +305,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       )}
 
-      {/* TABLE AREA */}
+      {/* TABLE */}
       <div className="table-area">
         <div className="opponents-row">
           {state.players.map((p, i) => {
@@ -336,7 +353,6 @@ export function GameBoard({ gameId }: GameBoardProps) {
         <div className="action-bar">
           {isExploding && isMyTurn ? (
             <>
-              {/* AUTO-CHECK FOR DEFUSE */}
               {hasDefuse ? (
                 <button className="btn-action btn-danger" onClick={handleDefuse} disabled={isActionPending}>
                   {isActionPending ? 'Processing...' : 'USE DEFUSE CARD'}
@@ -395,31 +411,25 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       </div>
 
-      {/* --- LOBBY / WAITING SCREEN --- */}
+      {/* LOBBY */}
       {phaseStr === 'WaitingForPlayers' && (
         <div className="overlay">
           <div style={{ background: '#1e293b', padding: 40, borderRadius: 20, textAlign: 'center', minWidth: '350px' }}>
             <h2>Waiting for Players ({state.players.length}/5)</h2>
-
             <div style={{ background: '#0f172a', padding: '15px', borderRadius: '8px', border: '1px solid #334155', margin: '20px 0' }}>
               <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: '#64748b', marginBottom: 5 }}>Invite Friends</div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#1e293b', padding: '8px 12px', borderRadius: 4, border: '1px solid #334155' }}>
                 <code style={{ color: '#3b82f6', fontWeight: 'bold', fontSize: '0.9rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '200px' }}>
                   {gameId}
                 </code>
-                <button
-                  onClick={copyGameId}
-                  style={{ background: '#3b82f6', color: 'white', fontSize: '0.75rem', padding: '4px 8px', marginLeft: 10 }}
-                >
+                <button onClick={copyGameId} style={{ background: '#3b82f6', color: 'white', fontSize: '0.75rem', padding: '4px 8px', marginLeft: 10 }}>
                   COPY
                 </button>
               </div>
             </div>
-
             <div style={{ display: 'flex', gap: 10, justifyContent: 'center', margin: '20px 0', flexWrap: 'wrap' }}>
               {state.players.map(p => <div key={p.id} className="turn-badge">{p.name}</div>)}
             </div>
-
             {state.players.length >= 2 ? (
               <button className="btn-action" onClick={() => api.start(gameId)}>START GAME</button>
             ) : <p style={{ color: '#94a3b8', fontSize: '0.9rem' }}>Need at least 2 players to start...</p>}
@@ -427,7 +437,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       )}
 
-      {/* GAME OVER MODAL */}
+      {/* GAME OVER */}
       {phaseStr === 'GameOver' && (
         <div className="overlay">
           <h1>🏆 GAME OVER 🏆</h1>
@@ -436,7 +446,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       )}
 
-      {/* ELIMINATED OVERLAY */}
+      {/* ELIMINATED */}
       {isEliminated && phaseStr !== 'GameOver' && (
         <div className="overlay" style={{ background: 'rgba(0,0,0,0.5)', pointerEvents: 'none' }}>
           <h1 style={{ color: 'red', transform: 'rotate(-10deg)', fontSize: '4rem', textShadow: '0 0 20px black' }}>ELIMINATED</h1>

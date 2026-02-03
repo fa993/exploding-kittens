@@ -19,6 +19,8 @@ export interface GameState {
   my_hand: Card[]; // New field (replaces finding self in players array)
   logs: { timestamp: number; message: string }[];
   last_action_result?: string;
+  // NEW: Server Timestamp
+  last_move_ts: number;
 }
 
 const API_BASE = '/games';

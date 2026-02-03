@@ -1,10 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::game::cards::{Card, CardType};
+use rand::Rng; // For gen_range
+use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use rand::{Rng, prelude::IteratorRandom};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // 1. DATA STRUCTURES
@@ -44,15 +44,18 @@ pub struct GameContext {
     // Mechanics
     pub actions_remaining: u8, // 1 = Normal, 2+ = Attacked
 
+    // NEW: Timestamp of the last valid move (Server Time)
+    pub last_move_ts: u64,
+
     // Audit Log (Client reads this to know what happened)
     pub logs: Vec<GameLog>,
 
     // Transient UI Helpers (Sent to client, cleared next turn)
-    pub last_action_result: Option<String>, // e.g. JSON of "See Future" cards
+    pub last_action_result: Option<String>,
 }
 
 /// The Inputs
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)] // Added PartialEq for checks
 #[serde(tag = "event", content = "data")]
 pub enum GameEvent {
     StartGame,
@@ -81,19 +84,21 @@ pub enum GameEvent {
         card_idx: usize,
         insert_depth: usize,
     },
-    TimerExpired, // Frontend tells us animation finished / time ran out
+    TimerExpired, // Backend automated event
 }
 
 #[derive(Serialize)]
 pub struct GameView {
     pub phase: GamePhase,
-    pub deck_count: usize, // Explicit count
+    pub deck_count: usize,
     pub discard_pile: Vec<Card>,
     pub players: Vec<PlayerView>,
     pub current_player_idx: usize,
-    pub my_hand: Vec<Card>, // The requesting player's full hand
+    pub my_hand: Vec<Card>,
     pub logs: Vec<GameLog>,
     pub last_action_result: Option<String>,
+    // NEW: Send timestamp to frontend
+    pub last_move_ts: u64,
 }
 
 #[derive(Serialize)]
@@ -101,7 +106,7 @@ pub struct PlayerView {
     pub id: String,
     pub name: String,
     pub is_eliminated: bool,
-    pub hand_count: usize, // Explicit count so UI knows how many cards they have
+    pub hand_count: usize,
 }
 
 // ============================================================================
@@ -117,6 +122,7 @@ impl GameContext {
             players: Vec::new(),
             current_player_idx: 0,
             actions_remaining: 0,
+            last_move_ts: 0,
             logs: Vec::new(),
             last_action_result: None,
         }
@@ -141,23 +147,24 @@ impl GameContext {
 
     /// THE GIANT STATE MACHINE FUNCTION
     pub fn transition(&mut self, event: GameEvent, actor_id: &str) -> Result<(), String> {
-        // 1. SECURITY CHECK: Is it actually this player's turn?
-        // We skip this check for 'StartGame' since no one is "current" yet.
-        if !matches!(event, GameEvent::StartGame) && actor_id != "system" {
+        // 1. SECURITY CHECK
+        // Allow "system" to bypass turn checks (for automated timers)
+        if actor_id != "system" && !matches!(event, GameEvent::StartGame) {
             let current_player_id = &self.players[self.current_player_idx].id;
-
             if current_player_id != actor_id {
                 return Err("Not your turn!".to_string());
             }
         }
 
-        // We clone phase to avoid borrow checker fighting during the match
+        // 2. UPDATE TIMESTAMP (Start of the "clock" for the next move)
+        let start = SystemTime::now();
+        let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+        self.last_move_ts = since_epoch.as_millis() as u64;
+
         let current_phase = self.phase.clone();
 
         match (current_phase, event) {
-            // ----------------------------------------------------------------
-            // PHASE: WAITING
-            // ----------------------------------------------------------------
+            // --- START ---
             (GamePhase::WaitingForPlayers, GameEvent::StartGame) => {
                 if self.players.len() < 2 {
                     return Err("Need 2+ players".into());
@@ -168,11 +175,8 @@ impl GameContext {
                 Ok(())
             }
 
-            // ----------------------------------------------------------------
-            // PHASE: PLAYER TURN
-            // ----------------------------------------------------------------
+            // --- NORMAL ACTIONS ---
             (GamePhase::PlayerTurn, GameEvent::DrawCard) => {
-                // 1. Peek top card
                 let card = self.deck.pop().ok_or("Deck empty!")?;
 
                 if matches!(card.kind, CardType::ExplodingKitten) {
@@ -188,7 +192,6 @@ impl GameContext {
                         card.kind,
                     ));
                     self.players[self.current_player_idx].hand.push(card);
-                    // Decrement actions (handles Attack stacking)
                     self.actions_remaining = self.actions_remaining.saturating_sub(1);
                     if self.actions_remaining == 0 {
                         self.next_turn(1);
@@ -201,8 +204,6 @@ impl GameContext {
                 self.validate_card(card_idx, CardType::Attack)?;
                 self.discard_card(card_idx);
                 self.log(format!("{} attacked!", self.current_player_name()));
-
-                // End turn immediately, next player gets 2 turns
                 self.next_turn(2);
                 Ok(())
             }
@@ -211,7 +212,6 @@ impl GameContext {
                 self.validate_card(card_idx, CardType::Skip)?;
                 self.discard_card(card_idx);
                 self.log(format!("{} played Skip.", self.current_player_name()));
-
                 self.actions_remaining = self.actions_remaining.saturating_sub(1);
                 if self.actions_remaining == 0 {
                     self.next_turn(1);
@@ -223,16 +223,13 @@ impl GameContext {
                 self.validate_card(card_idx, CardType::Shuffle)?;
                 self.discard_card(card_idx);
                 self.log(format!("{} shuffled the deck.", self.current_player_name()));
-
-                let mut rng = thread_rng();
-                self.deck.shuffle(&mut rng);
+                self.deck.shuffle(&mut thread_rng());
                 Ok(())
             }
 
             (GamePhase::PlayerTurn, GameEvent::PlaySeeTheFuture { card_idx }) => {
                 self.validate_card(card_idx, CardType::SeeTheFuture)?;
                 self.discard_card(card_idx);
-
                 let count = std::cmp::min(3, self.deck.len());
                 let peek: Vec<String> = self
                     .deck
@@ -241,8 +238,6 @@ impl GameContext {
                     .take(count)
                     .map(|c| format!("{:?}", c.kind))
                     .collect();
-
-                // We store this in the context so the frontend can render the modal
                 self.last_action_result = Some(serde_json::to_string(&peek).unwrap());
                 self.log(format!(
                     "{} gazed into the future.",
@@ -291,15 +286,13 @@ impl GameContext {
                     return Err("Cards must match".into());
                 }
 
-                // Discard both (sort desc to remove safely)
                 let mut sorted = card_indices.clone();
                 sorted.sort_by(|a, b| b.cmp(a));
                 for idx in sorted {
                     self.discard_card(idx);
                 }
 
-                let stolen = self.steal_random_card(target_idx);
-                if let Some(c) = stolen {
+                if let Some(c) = self.steal_random_card(target_idx) {
                     self.log(format!(
                         "{} played a Pair and stole a card. {:?}",
                         self.current_player_name(),
@@ -309,9 +302,7 @@ impl GameContext {
                 Ok(())
             }
 
-            // ----------------------------------------------------------------
-            // PHASE: EXPLOSION PENDING
-            // ----------------------------------------------------------------
+            // --- BOMB DEFUSAL ---
             (
                 GamePhase::ExplosionPending { .. },
                 GameEvent::PlayDefuse {
@@ -322,7 +313,6 @@ impl GameContext {
                 self.validate_card(card_idx, CardType::Defuse)?;
                 self.discard_card(card_idx);
 
-                // Re-insert Kitten
                 let kitten = Card::new(CardType::ExplodingKitten);
                 let safe_depth = std::cmp::min(insert_depth, self.deck.len());
                 let index = self.deck.len() - safe_depth;
@@ -333,67 +323,51 @@ impl GameContext {
                     self.current_player_name()
                 ));
 
-                // Turn ends after successful defuse
                 self.actions_remaining = self.actions_remaining.saturating_sub(1);
                 if self.actions_remaining == 0 {
                     self.next_turn(1);
                 }
-                self.phase = GamePhase::PlayerTurn; // Return to normal
+                self.phase = GamePhase::PlayerTurn;
                 Ok(())
             }
 
-            (current_phase, GameEvent::TimerExpired) => {
+            // --- AUTOMATED TIMEOUT (AFK HANDLER) ---
+            (phase_state, GameEvent::TimerExpired) => {
                 let p_idx = self.current_player_idx;
 
-                // Helper closure to handle "Explosion Logic"
-                // FIX: We avoid holding a reference to 'player' across 'ctx.log' calls
+                // Define logic closure to avoid borrow issues
                 let handle_explosion =
                     |ctx: &mut GameContext, player_idx: usize| -> Result<(), String> {
-                        // 1. Gather Info (Read-only or short-lived)
-                        let has_defuse_idx = ctx.players[player_idx]
+                        let player_name = ctx.players[player_idx].name.clone();
+                        let defuse_pos = ctx.players[player_idx]
                             .hand
                             .iter()
                             .position(|c| matches!(c.kind, CardType::Defuse));
-                        let player_name = ctx.players[player_idx].name.clone(); // Clone name to avoid borrow conflicts
 
-                        if let Some(defuse_idx) = has_defuse_idx {
-                            // --- A. AUTO-DEFUSE ---
+                        if let Some(defuse_idx) = defuse_pos {
+                            // A. AUTO-DEFUSE
+                            let card = ctx.players[player_idx].hand.remove(defuse_idx);
+                            ctx.discard_pile.push(card);
 
-                            // 1. Remove card
-                            let defuse_card = ctx.players[player_idx].hand.remove(defuse_idx);
-                            ctx.discard_pile.push(defuse_card);
-
-                            // 2. Insert Kitten Randomly
                             let kitten = Card::new(CardType::ExplodingKitten);
-                            let mut rng = rand::thread_rng();
-                            let depth = rng.gen_range(0..=ctx.deck.len());
+                            let depth = thread_rng().gen_range(0..=ctx.deck.len());
                             ctx.deck.insert(depth, kitten);
 
-                            // 3. Log (Now safe because we aren't holding &mut player)
                             ctx.log(format!(
                                 "😅 Auto-pilot: {} used a Defuse to survive!",
                                 player_name
                             ));
 
-                            // 4. End Turn
                             ctx.actions_remaining = ctx.actions_remaining.saturating_sub(1);
                             if ctx.actions_remaining == 0 {
                                 ctx.next_turn(1);
                             }
                             ctx.phase = GamePhase::PlayerTurn;
                         } else {
-                            // --- B. ELIMINATE ---
-
-                            // 1. Eliminate
+                            // B. ELIMINATE
                             ctx.players[player_idx].is_eliminated = true;
+                            ctx.log(format!("☠️ Timeout! {} exploded.", player_name));
 
-                            // 2. Log
-                            ctx.log(format!(
-                                "☠️ Timeout! {} drew a Kitten and had no Defuse.",
-                                player_name
-                            ));
-
-                            // 3. Check Win Condition
                             let survivors: Vec<usize> = ctx
                                 .players
                                 .iter()
@@ -403,11 +377,11 @@ impl GameContext {
                                 .collect();
 
                             if survivors.len() == 1 {
-                                let winner_name = ctx.players[survivors[0]].name.clone();
+                                let winner = ctx.players[survivors[0]].name.clone();
                                 ctx.phase = GamePhase::GameOver {
                                     winner_idx: survivors[0],
                                 };
-                                ctx.log(format!("Game Over! {} wins!", winner_name));
+                                ctx.log(format!("Game Over! {} wins!", winner));
                             } else {
                                 ctx.next_turn(1);
                                 ctx.phase = GamePhase::PlayerTurn;
@@ -416,22 +390,17 @@ impl GameContext {
                         Ok(())
                     };
 
-                match current_phase {
-                    // CASE 1: Timeout during normal turn (Force Draw)
+                match phase_state {
                     GamePhase::PlayerTurn => {
                         let name = self.players[p_idx].name.clone();
-                        self.log(format!("💤 {} is asleep. Forcing a card draw...", name));
+                        self.log(format!("💤 {} is asleep. Forcing draw...", name));
 
                         let card = self.deck.pop().ok_or("Deck empty")?;
-
                         if matches!(card.kind, CardType::ExplodingKitten) {
-                            // Immediate explosion logic
                             handle_explosion(self, p_idx)
                         } else {
-                            // Safe draw
                             self.log(format!("Auto-drew {:?} (Safe).", card.kind));
                             self.players[p_idx].hand.push(card);
-
                             self.actions_remaining = self.actions_remaining.saturating_sub(1);
                             if self.actions_remaining == 0 {
                                 self.next_turn(1);
@@ -439,25 +408,17 @@ impl GameContext {
                             Ok(())
                         }
                     }
-
-                    // CASE 2: Timeout while already holding the bomb (Force Defuse or Die)
                     GamePhase::ExplosionPending { .. } => handle_explosion(self, p_idx),
-
-                    _ => Ok(()), // Ignore timeouts in other phases
+                    _ => Ok(()),
                 }
             }
 
-            // ----------------------------------------------------------------
-            // FALLBACK / INVALID
-            // ----------------------------------------------------------------
             (GamePhase::GameOver { .. }, _) => Err("Game is over".into()),
             _ => Err("Invalid action for current phase".into()),
         }
     }
 
-    // ========================================================================
-    // HELPERS
-    // ========================================================================
+    // --- HELPERS ---
 
     fn setup_game(&mut self) {
         let mut rng = thread_rng();
@@ -477,7 +438,6 @@ impl GameContext {
         }
         bulk.shuffle(&mut rng);
 
-        // Deal 4 cards + 1 Defuse
         for p in &mut self.players {
             if let Some(d) = defuses.pop() {
                 p.hand.push(d);
@@ -489,8 +449,7 @@ impl GameContext {
             }
         }
 
-        // Add Kittens + Remaining Defuses to deck
-        let needed_kittens = self.players.len() - 1;
+        let needed_kittens = self.players.len().saturating_sub(1);
         for _ in 0..needed_kittens {
             if let Some(k) = kittens.pop() {
                 bulk.push(k);
@@ -514,11 +473,11 @@ impl GameContext {
             attempts += 1;
             if attempts > 6 {
                 break;
-            } // Sanity break
+            }
         }
         self.current_player_idx = idx;
         self.actions_remaining = actions;
-        self.last_action_result = None; // Clear transient UI data
+        self.last_action_result = None;
         self.log(format!("It is now {}'s turn.", self.current_player_name()));
     }
 
@@ -543,9 +502,7 @@ impl GameContext {
         if target.hand.is_empty() {
             return None;
         }
-
-        let mut rng = thread_rng();
-        let idx = (0..target.hand.len()).choose(&mut rng).unwrap();
+        let idx = (0..target.hand.len()).choose(&mut thread_rng()).unwrap();
         let card = target.hand.remove(idx);
         self.players[self.current_player_idx]
             .hand
@@ -559,21 +516,13 @@ impl GameContext {
 
     fn log(&mut self, msg: String) {
         let start = SystemTime::now();
-
-        let since_the_epoch = start
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards");
-
-        // Convert to Milliseconds so JS `new Date(ts)` works automatically
-        let ts = since_the_epoch.as_millis() as u64;
+        let since = start.duration_since(UNIX_EPOCH).unwrap();
         self.logs.push(GameLog {
-            timestamp: ts,
+            timestamp: since.as_millis() as u64,
             message: msg,
         });
     }
 
-    /// Creates a sanitized view for a specific player (hiding others' hands/deck)
-    // REPLACE the existing get_view_for_player with this:
     pub fn get_view_for_player(&self, player_id: &str) -> GameView {
         let players_view = self
             .players
@@ -582,7 +531,7 @@ impl GameContext {
                 id: p.id.clone(),
                 name: p.name.clone(),
                 is_eliminated: p.is_eliminated,
-                hand_count: p.hand.len(), // Send the count, not the cards!
+                hand_count: p.hand.len(),
             })
             .collect();
 
@@ -602,6 +551,7 @@ impl GameContext {
             my_hand,
             logs: self.logs.clone(),
             last_action_result: self.last_action_result.clone(),
+            last_move_ts: self.last_move_ts,
         }
     }
 }

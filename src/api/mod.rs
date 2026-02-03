@@ -151,58 +151,60 @@ async fn play_move(
 
     match game.transition(payload.action, &payload.player_id) {
         Ok(_) => {
-            // =================================================================
-            // ⏰ THE "GOD MODE" TIMER HOOK
-            // =================================================================
-            // We spawn a background task that watches the current player.
-            // If they are still the active player after X seconds, we force an event.
-            // =================================================================
-
-            let game_id = id.clone();
-            let state_clone = state.clone();
-
-            // Snapshot the state *after* the move finished
-            let target_phase_variant = std::mem::discriminant(&game.phase);
-            let target_player_idx = game.current_player_idx;
-
-            // Decide how long to wait based on phase
-            let timeout_seconds = match game.phase {
-                GamePhase::ExplosionPending { timer_seconds } => timer_seconds as u64,
-                GamePhase::PlayerTurn => 45, // Give them 45s for a normal turn
-                _ => 0,
-            };
-
-            if timeout_seconds > 0 {
-                tokio::spawn(async move {
-                    // 1. Wait patiently
-                    sleep(Duration::from_secs(timeout_seconds)).await;
-
-                    // 2. Wake up and check the game state
-                    let mut games = state_clone.games.lock().unwrap();
-                    if let Some(bg_game) = games.get_mut(&game_id) {
-                        // 3. VALIDATION: Is it *still* the same situation?
-                        // We check if the phase type is the same AND the active player is the same.
-                        let current_phase_variant = std::mem::discriminant(&bg_game.phase);
-
-                        if current_phase_variant == target_phase_variant
-                            && bg_game.current_player_idx == target_player_idx
-                        {
-                            println!(
-                                "⏰ Timeout! Auto-playing for player {} in game {}",
-                                target_player_idx, game_id
-                            );
-
-                            // 4. Force the move (Using "system" as actor_id allows it to bypass checks if needed,
-                            //    though our engine validates logic, not just ID for TimerExpired)
-                            let _ = bg_game.transition(GameEvent::TimerExpired, "system");
-                        }
-                    }
-                });
-            }
-            // =================================================================
+            // Trigger the automated timer AFTER a move is successfully made
+            spawn_timer(
+                state.clone(),
+                id.clone(),
+                game.phase.clone(),
+                game.current_player_idx,
+            );
 
             (StatusCode::OK, "Move accepted").into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
+}
+
+// --- HELPER: RECURSIVE TIMER ---
+fn spawn_timer(state: AppState, game_id: String, phase: GamePhase, player_idx: usize) {
+    let timeout_seconds = match phase {
+        GamePhase::ExplosionPending { timer_seconds } => timer_seconds as u64,
+        GamePhase::PlayerTurn => 45,
+        _ => return, // No timer for other phases
+    };
+
+    let target_phase_variant = std::mem::discriminant(&phase);
+
+    tokio::spawn(async move {
+        // 1. Wait patiently
+        sleep(Duration::from_secs(timeout_seconds)).await;
+
+        let mut games = state.games.lock().unwrap();
+        if let Some(bg_game) = games.get_mut(&game_id) {
+            let current_phase_variant = std::mem::discriminant(&bg_game.phase);
+
+            // 2. Validate nothing changed while we slept
+            if current_phase_variant == target_phase_variant
+                && bg_game.current_player_idx == player_idx
+            {
+                println!(
+                    "⏰ Timeout! Auto-playing for player {} in game {}",
+                    player_idx, game_id
+                );
+
+                // 3. EXECUTE TIMEOUT
+                // Using "system" as actor bypasses basic ID checks
+                if let Ok(_) = bg_game.transition(GameEvent::TimerExpired, "system") {
+                    // 4. CHAIN REACTION
+                    // Spawn a NEW timer for the resulting state (infinite auto-play)
+                    spawn_timer(
+                        state.clone(),
+                        game_id.clone(),
+                        bg_game.phase.clone(),
+                        bg_game.current_player_idx,
+                    );
+                }
+            }
+        }
+    });
 }
