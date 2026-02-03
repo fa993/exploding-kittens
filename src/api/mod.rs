@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use crate::AppState;
-use crate::game::engine::{GameContext, GameEvent};
+use crate::game::engine::{GameContext, GameEvent, GamePhase};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -8,6 +10,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 use uuid::Uuid;
 
 // ============================================================================
@@ -106,7 +109,7 @@ async fn start_game(Path(id): Path<String>, State(state): State<AppState>) -> im
     let mut games = state.games.lock().unwrap();
 
     if let Some(game) = games.get_mut(&id) {
-        match game.transition(GameEvent::StartGame, format!("-1").as_str()) {
+        match game.transition(GameEvent::StartGame, format!("system").as_str()) {
             Ok(_) => (StatusCode::OK, "Game Started").into_response(),
             Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
         }
@@ -137,17 +140,69 @@ async fn get_game_state(
 async fn play_move(
     Path(id): Path<String>,
     State(state): State<AppState>,
-    Json(payload): Json<MoveRequest>, // Payload now includes player_id
+    Json(payload): Json<MoveRequest>,
 ) -> impl IntoResponse {
     let mut games = state.games.lock().unwrap();
 
-    if let Some(game) = games.get_mut(&id) {
-        // PASS THE ID HERE
-        match game.transition(payload.action, &payload.player_id) {
-            Ok(_) => (StatusCode::OK, "Move accepted").into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    let game = match games.get_mut(&id) {
+        Some(g) => g,
+        None => return (StatusCode::NOT_FOUND, "Game not found").into_response(),
+    };
+
+    match game.transition(payload.action, &payload.player_id) {
+        Ok(_) => {
+            // =================================================================
+            // ⏰ THE "GOD MODE" TIMER HOOK
+            // =================================================================
+            // We spawn a background task that watches the current player.
+            // If they are still the active player after X seconds, we force an event.
+            // =================================================================
+
+            let game_id = id.clone();
+            let state_clone = state.clone();
+
+            // Snapshot the state *after* the move finished
+            let target_phase_variant = std::mem::discriminant(&game.phase);
+            let target_player_idx = game.current_player_idx;
+
+            // Decide how long to wait based on phase
+            let timeout_seconds = match game.phase {
+                GamePhase::ExplosionPending { timer_seconds } => timer_seconds as u64,
+                GamePhase::PlayerTurn => 45, // Give them 45s for a normal turn
+                _ => 0,
+            };
+
+            if timeout_seconds > 0 {
+                tokio::spawn(async move {
+                    // 1. Wait patiently
+                    sleep(Duration::from_secs(timeout_seconds)).await;
+
+                    // 2. Wake up and check the game state
+                    let mut games = state_clone.games.lock().unwrap();
+                    if let Some(bg_game) = games.get_mut(&game_id) {
+                        // 3. VALIDATION: Is it *still* the same situation?
+                        // We check if the phase type is the same AND the active player is the same.
+                        let current_phase_variant = std::mem::discriminant(&bg_game.phase);
+
+                        if current_phase_variant == target_phase_variant
+                            && bg_game.current_player_idx == target_player_idx
+                        {
+                            println!(
+                                "⏰ Timeout! Auto-playing for player {} in game {}",
+                                target_player_idx, game_id
+                            );
+
+                            // 4. Force the move (Using "system" as actor_id allows it to bypass checks if needed,
+                            //    though our engine validates logic, not just ID for TimerExpired)
+                            let _ = bg_game.transition(GameEvent::TimerExpired, "system");
+                        }
+                    }
+                });
+            }
+            // =================================================================
+
+            (StatusCode::OK, "Move accepted").into_response()
         }
-    } else {
-        (StatusCode::NOT_FOUND, "Game ID not found").into_response()
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }

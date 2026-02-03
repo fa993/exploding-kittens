@@ -1,9 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::game::cards::{Card, CardType};
-use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use rand::{Rng, prelude::IteratorRandom};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -143,7 +143,7 @@ impl GameContext {
     pub fn transition(&mut self, event: GameEvent, actor_id: &str) -> Result<(), String> {
         // 1. SECURITY CHECK: Is it actually this player's turn?
         // We skip this check for 'StartGame' since no one is "current" yet.
-        if !matches!(event, GameEvent::StartGame) {
+        if !matches!(event, GameEvent::StartGame) && actor_id != "system" {
             let current_player_id = &self.players[self.current_player_idx].id;
 
             if current_player_id != actor_id {
@@ -342,32 +342,109 @@ impl GameContext {
                 Ok(())
             }
 
-            (GamePhase::ExplosionPending { .. }, GameEvent::TimerExpired) => {
-                self.log(format!("BOOM! {} exploded.", self.current_player_name()));
-                self.players[self.current_player_idx].is_eliminated = true;
+            (current_phase, GameEvent::TimerExpired) => {
+                let p_idx = self.current_player_idx;
 
-                // Check Win Condition
-                let survivors: Vec<usize> = self
-                    .players
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, p)| !p.is_eliminated)
-                    .map(|(i, _)| i)
-                    .collect();
+                // Helper closure to handle "Explosion Logic"
+                // FIX: We avoid holding a reference to 'player' across 'ctx.log' calls
+                let handle_explosion =
+                    |ctx: &mut GameContext, player_idx: usize| -> Result<(), String> {
+                        // 1. Gather Info (Read-only or short-lived)
+                        let has_defuse_idx = ctx.players[player_idx]
+                            .hand
+                            .iter()
+                            .position(|c| matches!(c.kind, CardType::Defuse));
+                        let player_name = ctx.players[player_idx].name.clone(); // Clone name to avoid borrow conflicts
 
-                if survivors.len() == 1 {
-                    self.phase = GamePhase::GameOver {
-                        winner_idx: survivors[0],
+                        if let Some(defuse_idx) = has_defuse_idx {
+                            // --- A. AUTO-DEFUSE ---
+
+                            // 1. Remove card
+                            let defuse_card = ctx.players[player_idx].hand.remove(defuse_idx);
+                            ctx.discard_pile.push(defuse_card);
+
+                            // 2. Insert Kitten Randomly
+                            let kitten = Card::new(CardType::ExplodingKitten);
+                            let mut rng = rand::thread_rng();
+                            let depth = rng.gen_range(0..=ctx.deck.len());
+                            ctx.deck.insert(depth, kitten);
+
+                            // 3. Log (Now safe because we aren't holding &mut player)
+                            ctx.log(format!(
+                                "😅 Auto-pilot: {} used a Defuse to survive!",
+                                player_name
+                            ));
+
+                            // 4. End Turn
+                            ctx.actions_remaining = ctx.actions_remaining.saturating_sub(1);
+                            if ctx.actions_remaining == 0 {
+                                ctx.next_turn(1);
+                            }
+                            ctx.phase = GamePhase::PlayerTurn;
+                        } else {
+                            // --- B. ELIMINATE ---
+
+                            // 1. Eliminate
+                            ctx.players[player_idx].is_eliminated = true;
+
+                            // 2. Log
+                            ctx.log(format!(
+                                "☠️ Timeout! {} drew a Kitten and had no Defuse.",
+                                player_name
+                            ));
+
+                            // 3. Check Win Condition
+                            let survivors: Vec<usize> = ctx
+                                .players
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, p)| !p.is_eliminated)
+                                .map(|(i, _)| i)
+                                .collect();
+
+                            if survivors.len() == 1 {
+                                let winner_name = ctx.players[survivors[0]].name.clone();
+                                ctx.phase = GamePhase::GameOver {
+                                    winner_idx: survivors[0],
+                                };
+                                ctx.log(format!("Game Over! {} wins!", winner_name));
+                            } else {
+                                ctx.next_turn(1);
+                                ctx.phase = GamePhase::PlayerTurn;
+                            }
+                        }
+                        Ok(())
                     };
-                    self.log(format!(
-                        "Game Over! {} wins!",
-                        self.players[survivors[0]].name
-                    ));
-                } else {
-                    self.next_turn(1);
-                    self.phase = GamePhase::PlayerTurn;
+
+                match current_phase {
+                    // CASE 1: Timeout during normal turn (Force Draw)
+                    GamePhase::PlayerTurn => {
+                        let name = self.players[p_idx].name.clone();
+                        self.log(format!("💤 {} is asleep. Forcing a card draw...", name));
+
+                        let card = self.deck.pop().ok_or("Deck empty")?;
+
+                        if matches!(card.kind, CardType::ExplodingKitten) {
+                            // Immediate explosion logic
+                            handle_explosion(self, p_idx)
+                        } else {
+                            // Safe draw
+                            self.log(format!("Auto-drew {:?} (Safe).", card.kind));
+                            self.players[p_idx].hand.push(card);
+
+                            self.actions_remaining = self.actions_remaining.saturating_sub(1);
+                            if self.actions_remaining == 0 {
+                                self.next_turn(1);
+                            }
+                            Ok(())
+                        }
+                    }
+
+                    // CASE 2: Timeout while already holding the bomb (Force Defuse or Die)
+                    GamePhase::ExplosionPending { .. } => handle_explosion(self, p_idx),
+
+                    _ => Ok(()), // Ignore timeouts in other phases
                 }
-                Ok(())
             }
 
             // ----------------------------------------------------------------
