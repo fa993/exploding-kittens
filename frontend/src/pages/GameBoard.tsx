@@ -18,7 +18,8 @@ export function GameBoard({ gameId }: GameBoardProps) {
   const [showLogs, setShowLogs] = useState(false);
   const [isActionPending, setIsActionPending] = useState(false);
 
-  const logsEndRef = useRef<HTMLDivElement>(null);
+  // FIX 1: Ref now points to the Container, not an element inside
+  const logsContainerRef = useRef<HTMLDivElement>(null);
   const playerId = sessionStorage.getItem('player_id') || '';
 
   // --- POLLING ---
@@ -32,10 +33,12 @@ export function GameBoard({ gameId }: GameBoardProps) {
     return () => clearInterval(interval);
   }, [gameId]);
 
-  // Auto Scroll Logs
+  // FIX 2: Manually set scrollTop instead of using scrollIntoView
   useEffect(() => {
-    if (showLogs && logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (showLogs && logsContainerRef.current) {
+      const container = logsContainerRef.current;
+      // Immediate scroll to bottom without moving the page
+      container.scrollTop = container.scrollHeight;
     }
   }, [state?.logs, showLogs]);
 
@@ -49,7 +52,6 @@ export function GameBoard({ gameId }: GameBoardProps) {
     if (confirm("Are you sure you want to leave the game?")) route('/');
   };
 
-  // NEW: Copy to Clipboard Handler
   const copyGameId = async () => {
     try {
       await navigator.clipboard.writeText(gameId);
@@ -151,14 +153,14 @@ export function GameBoard({ gameId }: GameBoardProps) {
 
     setIsActionPending(true);
     try {
-      // 2. CALCULATE RANDOM DEPTH ON CLIENT
-      // Range: 0 (Bottom) to deck_count (Top)
-      // We use state.deck_count from the view we added earlier
+      // Calculate random depth on client
       const maxDepth = state.deck_count;
       const randomDepth = Math.floor(Math.random() * (maxDepth + 1));
 
-      // 3. Send to Backe
-      await api.move(gameId, playerId, { event: 'PlayDefuse', data: { card_idx: defuseIdx, insert_depth: randomDepth } });
+      await api.move(gameId, playerId, {
+        event: 'PlayDefuse',
+        data: { card_idx: defuseIdx, insert_depth: randomDepth }
+      });
       showToast(`Defused! Kitten hidden at depth ${randomDepth}.`);
     } catch (e: any) { showToast(e.message, 'error'); }
     finally { setIsActionPending(false); }
@@ -205,14 +207,14 @@ export function GameBoard({ gameId }: GameBoardProps) {
             <span>Audit Logs</span>
             <span style={{ cursor: 'pointer' }} onClick={() => setShowLogs(false)}>✕</span>
           </div>
-          <div className="logs-list">
+          {/* FIX 3: Attach Ref to the container, not a dummy element */}
+          <div className="logs-list" ref={logsContainerRef}>
             {state.logs.map((l, i) => (
               <div key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: 4 }}>
                 <span style={{ color: '#64748b', marginRight: 5 }}>[{new Date(l.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}]</span>
                 {l.message}
               </div>
             ))}
-            <div ref={logsEndRef} />
           </div>
         </div>
       )}
@@ -321,13 +323,11 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       </div>
 
-      {/* --- LOBBY / WAITING SCREEN WITH COPY BUTTON --- */}
       {phaseStr === 'WaitingForPlayers' && (
         <div className="overlay">
           <div style={{ background: '#1e293b', padding: 40, borderRadius: 20, textAlign: 'center', minWidth: '350px' }}>
             <h2>Waiting for Players ({state.players.length}/5)</h2>
 
-            {/* GAME ID CARD */}
             <div style={{ background: '#0f172a', padding: '15px', borderRadius: '8px', border: '1px solid #334155', margin: '20px 0' }}>
               <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: '#64748b', marginBottom: 5 }}>Invite Friends</div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#1e293b', padding: '8px 12px', borderRadius: 4, border: '1px solid #334155' }}>
