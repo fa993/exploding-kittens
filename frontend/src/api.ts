@@ -1,23 +1,22 @@
 export interface Card {
   id: string;
-  kind: {
-    type: string;
-    data?: string;
-  };
+  kind: { type: string; data?: string; };
+}
+
+export interface PlayerView {
+  id: string;
+  name: string;
+  is_eliminated: boolean;
+  hand_count: number; // New field
 }
 
 export interface GameState {
   phase: string | { [key: string]: any };
-  deck: any[];
+  deck_count: number; // New field
   discard_pile: Card[];
-  players: { 
-    id: string; 
-    name: string; 
-    hand: Card[]; 
-    is_eliminated: boolean 
-  }[];
+  players: PlayerView[];
   current_player_idx: number;
-  actions_remaining: number;
+  my_hand: Card[]; // New field (replaces finding self in players array)
   logs: { timestamp: number; message: string }[];
   last_action_result?: string;
 }
@@ -55,15 +54,15 @@ export const api = {
     const res = await fetch(`${API_BASE}/${gameId}/move`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
+      body: JSON.stringify({
         player_id: playerId, // Security: Send who is acting
-        action 
+        action
       }),
     });
-    
+
     if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt);
+      const txt = await res.text();
+      throw new Error(txt);
     }
   },
 };

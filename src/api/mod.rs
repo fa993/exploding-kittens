@@ -125,8 +125,8 @@ async fn get_game_state(
     let games = state.games.lock().unwrap();
 
     if let Some(game) = games.get(&id) {
-        // Use the engine method we wrote earlier to sanitize data
         let view = game.get_view_for_player(&params.player_id);
+        // Axum serializes the GameView struct automatically
         (StatusCode::OK, Json(view)).into_response()
     } else {
         (StatusCode::NOT_FOUND, "Game ID not found").into_response()

@@ -54,14 +54,30 @@ impl CardType {
         let mut deck = Vec::new();
 
         // 1. Core Actions
-        for _ in 0..6 { deck.push(CardType::Defuse); }
-        for _ in 0..5 { deck.push(CardType::Nope); }
-        for _ in 0..4 { deck.push(CardType::ExplodingKitten); }
-        for _ in 0..4 { deck.push(CardType::Attack); }
-        for _ in 0..4 { deck.push(CardType::Skip); }
-        for _ in 0..4 { deck.push(CardType::Favor); }
-        for _ in 0..4 { deck.push(CardType::Shuffle); }
-        for _ in 0..5 { deck.push(CardType::SeeTheFuture); }
+        for _ in 0..5 {
+            deck.push(CardType::Defuse);
+        }
+        for _ in 0..5 {
+            deck.push(CardType::Nope);
+        }
+        for _ in 0..6 {
+            deck.push(CardType::ExplodingKitten);
+        }
+        for _ in 0..4 {
+            deck.push(CardType::Attack);
+        }
+        for _ in 0..4 {
+            deck.push(CardType::Skip);
+        }
+        for _ in 0..4 {
+            deck.push(CardType::Favor);
+        }
+        for _ in 0..4 {
+            deck.push(CardType::Shuffle);
+        }
+        for _ in 0..5 {
+            deck.push(CardType::SeeTheFuture);
+        }
 
         // 2. Cat Cards (4 of each breed)
         let breeds = [

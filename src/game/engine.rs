@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::game::cards::{Card, CardType};
 use rand::prelude::IteratorRandom;
 use rand::seq::SliceRandom;
@@ -82,6 +84,26 @@ pub enum GameEvent {
     TimerExpired, // Frontend tells us animation finished / time ran out
 }
 
+#[derive(Serialize)]
+pub struct GameView {
+    pub phase: GamePhase,
+    pub deck_count: usize, // Explicit count
+    pub discard_pile: Vec<Card>,
+    pub players: Vec<PlayerView>,
+    pub current_player_idx: usize,
+    pub my_hand: Vec<Card>, // The requesting player's full hand
+    pub logs: Vec<GameLog>,
+    pub last_action_result: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PlayerView {
+    pub id: String,
+    pub name: String,
+    pub is_eliminated: bool,
+    pub hand_count: usize, // Explicit count so UI knows how many cards they have
+}
+
 // ============================================================================
 // 2. THE BIG LOGIC
 // ============================================================================
@@ -160,12 +182,12 @@ impl GameContext {
                     ));
                     self.phase = GamePhase::ExplosionPending { timer_seconds: 30 };
                 } else {
-                    self.players[self.current_player_idx].hand.push(card);
                     self.log(format!(
-                        "{} drew a card safely.",
-                        self.current_player_name()
+                        "{} drew a card safely. {:?}",
+                        self.current_player_name(),
+                        card.kind,
                     ));
-
+                    self.players[self.current_player_idx].hand.push(card);
                     // Decrement actions (handles Attack stacking)
                     self.actions_remaining = self.actions_remaining.saturating_sub(1);
                     if self.actions_remaining == 0 {
@@ -279,7 +301,7 @@ impl GameContext {
                 let stolen = self.steal_random_card(target_idx);
                 if let Some(c) = stolen {
                     self.log(format!(
-                        "{} played a Pair and stole a card. {:#?}",
+                        "{} played a Pair and stole a card. {:?}",
                         self.current_player_name(),
                         c.kind
                     ));
@@ -459,8 +481,14 @@ impl GameContext {
     }
 
     fn log(&mut self, msg: String) {
-        // Simple timestamp mockup. In real app use SystemTime
-        let ts = 0;
+        let start = SystemTime::now();
+
+        let since_the_epoch = start
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards");
+
+        // Convert to Milliseconds so JS `new Date(ts)` works automatically
+        let ts = since_the_epoch.as_millis() as u64;
         self.logs.push(GameLog {
             timestamp: ts,
             message: msg,
@@ -468,24 +496,35 @@ impl GameContext {
     }
 
     /// Creates a sanitized view for a specific player (hiding others' hands/deck)
-    pub fn get_view_for_player(&self, player_id: &str) -> GameContext {
-        let mut view = self.clone();
+    // REPLACE the existing get_view_for_player with this:
+    pub fn get_view_for_player(&self, player_id: &str) -> GameView {
+        let players_view = self
+            .players
+            .iter()
+            .map(|p| PlayerView {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                is_eliminated: p.is_eliminated,
+                hand_count: p.hand.len(), // Send the count, not the cards!
+            })
+            .collect();
 
-        // Hide Deck
-        view.deck = vec![]; // Or obscure them
+        let my_hand = self
+            .players
+            .iter()
+            .find(|p| p.id == player_id)
+            .map(|p| p.hand.clone())
+            .unwrap_or_default();
 
-        // Hide other players' hands
-        for p in &mut view.players {
-            if p.id != player_id {
-                // Keep the COUNT of cards, but remove the data
-                // In a real app you might replace them with "CardBack" placeholders
-                // For this struct, we just empty it or you'd need a ViewStruct.
-                // We'll leave it empty for safety.
-                p.hand = vec![];
-            }
+        GameView {
+            phase: self.phase.clone(),
+            deck_count: self.deck.len(),
+            discard_pile: self.discard_pile.clone(),
+            players: players_view,
+            current_player_idx: self.current_player_idx,
+            my_hand,
+            logs: self.logs.clone(),
+            last_action_result: self.last_action_result.clone(),
         }
-
-        // We DO keep the logs, actions_remaining, etc.
-        view
     }
 }
