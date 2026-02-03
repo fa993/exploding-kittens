@@ -23,7 +23,7 @@ RUN npm run build
 # ==========================================
 # Stage 2: Build Backend (Rust)
 # ==========================================
-FROM rust:1.76-alpine AS backend-builder
+FROM rust:1.92-alpine AS backend-builder
 
 # Install C compiler essentials for Alpine (musl)
 RUN apk add --no-cache musl-dev

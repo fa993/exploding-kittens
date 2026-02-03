@@ -18,26 +18,53 @@ export function GameBoard({ gameId }: GameBoardProps) {
   const [showLogs, setShowLogs] = useState(false);
   const [isActionPending, setIsActionPending] = useState(false);
 
-  // FIX 1: Ref now points to the Container, not an element inside
+  // NEW: Countdown State
+  const [timeLeft, setTimeLeft] = useState(0);
+
+  // Refs
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const playerId = sessionStorage.getItem('player_id') || '';
 
-  // --- POLLING ---
+  // --- POLLING & SYNC ---
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const s = await api.getState(gameId, playerId);
-        setState(s);
+
+        setState(prev => {
+          // DETECT TURN CHANGE -> RESET TIMER
+          // We check if the player index changed OR if the phase object changed (e.g. Turn -> Explosion)
+          if (!prev ||
+            prev.current_player_idx !== s.current_player_idx ||
+            JSON.stringify(prev.phase) !== JSON.stringify(s.phase)) {
+
+            const phaseStr = typeof s.phase === 'string' ? s.phase : Object.keys(s.phase)[0];
+
+            // Sync with Backend Constants
+            if (phaseStr === 'ExplosionPending') setTimeLeft(30);
+            else if (phaseStr === 'PlayerTurn') setTimeLeft(45);
+            else setTimeLeft(0);
+          }
+          return s;
+        });
       } catch (e) { console.error("Poll fail", e); }
     }, 1000);
     return () => clearInterval(interval);
   }, [gameId]);
 
-  // FIX 2: Manually set scrollTop instead of using scrollIntoView
+  // --- COUNTDOWN TICKER ---
+  useEffect(() => {
+    if (timeLeft <= 0) return;
+    const timer = setInterval(() => {
+      setTimeLeft(t => t > 0 ? t - 1 : 0);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [timeLeft]);
+
+  // --- AUTO SCROLL LOGS ---
   useEffect(() => {
     if (showLogs && logsContainerRef.current) {
       const container = logsContainerRef.current;
-      // Immediate scroll to bottom without moving the page
       container.scrollTop = container.scrollHeight;
     }
   }, [state?.logs, showLogs]);
@@ -166,6 +193,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
     finally { setIsActionPending(false); }
   };
 
+  // Maps to Backend "TimerExpired" -> Auto-Play Defuse or Die
   const handleAcceptFate = async () => {
     if (isActionPending) return;
     setIsActionPending(true);
@@ -175,13 +203,23 @@ export function GameBoard({ gameId }: GameBoardProps) {
     finally { setIsActionPending(false); }
   };
 
+  // Helper for progress bar color
+  const getTimerColor = () => {
+    if (timeLeft > 20) return '#22c55e'; // Green
+    if (timeLeft > 10) return '#eab308'; // Yellow
+    return '#ef4444'; // Red
+  };
+
   return (
     <div className="game-layout">
+      {/* TOASTS */}
       <div className="toast-area">
         {toasts.map(t => <div key={t.id} className={`toast ${t.type}`}>{t.msg}</div>)}
       </div>
 
+      {/* HEADER */}
       <div className="header">
+        {/* Left: Title & Logs */}
         <div style={{ display: 'flex', gap: 15, alignItems: 'center' }}>
           <div style={{ fontWeight: 800, fontSize: '1.2rem', color: '#ef4444' }}>💣 KITTENS</div>
           <button className="log-toggle-btn" onClick={() => setShowLogs(!showLogs)}>
@@ -189,10 +227,41 @@ export function GameBoard({ gameId }: GameBoardProps) {
           </button>
         </div>
 
-        <div className={`turn-badge ${isMyTurn ? 'my-turn' : ''}`}>
-          {isMyTurn ? "YOUR TURN" : `${state.players[state.current_player_idx]?.name}'s Turn`}
+        {/* CENTER: Turn + Timer */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <div className={`turn-badge ${isMyTurn ? 'my-turn' : ''}`}>
+            {isMyTurn ? "YOUR TURN" : `${state.players[state.current_player_idx]?.name}'s Turn`}
+          </div>
+
+          {/* CHANGE: Only show timer if  moves have happened */}
+          {state.logs?.[state.logs.length - 1].message != 'Game Started!' && (phaseStr === 'PlayerTurn' || phaseStr === 'ExplosionPending') && (
+            <>
+              <div style={{
+                width: '100%', maxWidth: '200px', height: '4px',
+                background: '#334155', marginTop: '8px', borderRadius: '2px', overflow: 'hidden'
+              }}>
+                <div style={{
+                  height: '100%',
+                  width: `${(timeLeft / (isExploding ? 30 : 45)) * 100}%`,
+                  background: getTimerColor(),
+                  transition: 'width 1s linear'
+                }} />
+              </div>
+              <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginTop: 2, height: '1rem' }}>
+                {timeLeft > 0 ? `${timeLeft}s` : ''}
+              </div>
+            </>
+          )}
+
+          {/* Optional: Indicator for first turn */}
+          {state.logs.length <= 1 && isMyTurn && (
+            <div style={{ fontSize: '0.7rem', color: '#22c55e', marginTop: 5 }}>
+              Start the game when ready!
+            </div>
+          )}
         </div>
 
+        {/* Right: Room ID & Exit */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 15 }}>
           <div style={{ fontSize: '0.9rem', opacity: 0.7 }}>Room: {gameId.slice(0, 4)}</div>
           <div onClick={handleExit} style={{ cursor: 'pointer', color: '#94a3b8', display: 'flex', alignItems: 'center' }} title="Exit">
@@ -201,13 +270,13 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       </div>
 
+      {/* LOGS OVERLAY */}
       {showLogs && (
         <div className="logs-modal">
           <div className="logs-header">
             <span>Audit Logs</span>
             <span style={{ cursor: 'pointer' }} onClick={() => setShowLogs(false)}>✕</span>
           </div>
-          {/* FIX 3: Attach Ref to the container, not a dummy element */}
           <div className="logs-list" ref={logsContainerRef}>
             {state.logs.map((l, i) => (
               <div key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: 4 }}>
@@ -219,6 +288,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       )}
 
+      {/* TABLE AREA */}
       <div className="table-area">
         <div className="opponents-row">
           {state.players.map((p, i) => {
@@ -261,10 +331,12 @@ export function GameBoard({ gameId }: GameBoardProps) {
         )}
       </div>
 
+      {/* PLAYER CONTROLS */}
       <div className="player-controls">
         <div className="action-bar">
           {isExploding && isMyTurn ? (
             <>
+              {/* AUTO-CHECK FOR DEFUSE */}
               {hasDefuse ? (
                 <button className="btn-action btn-danger" onClick={handleDefuse} disabled={isActionPending}>
                   {isActionPending ? 'Processing...' : 'USE DEFUSE CARD'}
@@ -323,6 +395,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       </div>
 
+      {/* --- LOBBY / WAITING SCREEN --- */}
       {phaseStr === 'WaitingForPlayers' && (
         <div className="overlay">
           <div style={{ background: '#1e293b', padding: 40, borderRadius: 20, textAlign: 'center', minWidth: '350px' }}>
@@ -354,6 +427,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       )}
 
+      {/* GAME OVER MODAL */}
       {phaseStr === 'GameOver' && (
         <div className="overlay">
           <h1>🏆 GAME OVER 🏆</h1>
@@ -362,6 +436,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
         </div>
       )}
 
+      {/* ELIMINATED OVERLAY */}
       {isEliminated && phaseStr !== 'GameOver' && (
         <div className="overlay" style={{ background: 'rgba(0,0,0,0.5)', pointerEvents: 'none' }}>
           <h1 style={{ color: 'red', transform: 'rotate(-10deg)', fontSize: '4rem', textShadow: '0 0 20px black' }}>ELIMINATED</h1>
