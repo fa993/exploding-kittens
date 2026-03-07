@@ -15,6 +15,10 @@ RUN npm ci
 # 3. Copy the rest of the frontend source
 COPY frontend/ .
 
+ARG VITE_APP_BASE_PATH=/
+# This makes it available to the 'npm run build' process
+ENV VITE_APP_BASE_PATH=$VITE_APP_BASE_PATH
+
 # 4. Build the frontend
 # Note: Your vite.config.ts is set to output to '../dist' (which is /app/dist)
 RUN npm run build
@@ -41,6 +45,10 @@ COPY src ./src
 
 # 3. Touch main.rs to force a rebuild of your code (not the deps)
 RUN touch src/main.rs
+ARG VITE_APP_BASE_PATH=/
+# This makes it available to the 'cargo build' process
+ENV VITE_APP_BASE_PATH=$VITE_APP_BASE_PATH
+
 RUN cargo build --release
 
 # 4. Strip debug symbols to reduce image size

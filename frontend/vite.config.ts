@@ -7,6 +7,7 @@ export default defineConfig({
     outDir: '../dist',
     emptyOutDir: true,
   },
+  base: process.env.VITE_APP_BASE_PATH || '/', // build
   server: {
     port: 8080,
     proxy: {
