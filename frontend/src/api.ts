@@ -1,3 +1,5 @@
+import { base } from "./utils";
+
 export interface Card {
   id: string;
   kind: { type: string; data?: string; };
@@ -23,7 +25,7 @@ export interface GameState {
   last_move_ts: number;
 }
 
-const API_BASE = '/games';
+const API_BASE = base + '/games';
 
 export const api = {
   create: async () => {

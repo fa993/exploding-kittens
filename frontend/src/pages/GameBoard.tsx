@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'preact/hooks';
 import { route } from 'preact-router';
 import { api, GameState } from '../api';
+import { base } from '../utils';
 
 interface GameBoardProps { gameId?: string; path?: string; }
 
@@ -96,7 +97,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
   };
 
   const handleExit = () => {
-    if (confirm("Are you sure you want to leave the game?")) route('/');
+    if (confirm("Are you sure you want to leave the game?")) route(base);
   };
 
   const copyGameId = async () => {
@@ -442,7 +443,7 @@ export function GameBoard({ gameId }: GameBoardProps) {
         <div className="overlay">
           <h1>🏆 GAME OVER 🏆</h1>
           <p>Check the logs to see who won!</p>
-          <button className="btn-action" onClick={() => route('/')}>Back to Home</button>
+          <button className="btn-action" onClick={() => route(base)}>Back to Home</button>
         </div>
       )}
 

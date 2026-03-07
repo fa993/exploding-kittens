@@ -8,15 +8,4 @@ export default defineConfig({
     emptyOutDir: true,
   },
   base: process.env.VITE_APP_BASE_PATH || '/', // build
-  server: {
-    port: 8080,
-    proxy: {
-      // FIX: Proxy /games directly to the backend. No rewrite needed.
-      '/games': {
-        target: 'http://localhost:3000',
-        changeOrigin: true,
-        secure: false,
-      },
-    },
-  },
 });
