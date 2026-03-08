@@ -64,7 +64,7 @@ pub fn router() -> Router<AppState> {
 /// POST /games
 /// Creates a new game lobby
 async fn create_game(State(state): State<AppState>) -> impl IntoResponse {
-    let mut games = state.games.lock().unwrap(); // Lock the map
+    let mut games = state.games.write().await;
 
     let game_id = Uuid::new_v4().to_string();
     let game = GameContext::new();
@@ -82,7 +82,7 @@ async fn join_game(
     State(state): State<AppState>,
     Json(payload): Json<JoinRequest>,
 ) -> impl IntoResponse {
-    let mut games = state.games.lock().unwrap();
+    let mut games = state.games.write().await;
 
     if let Some(game) = games.get_mut(&id) {
         let player_id = Uuid::new_v4().to_string();
@@ -106,7 +106,7 @@ async fn join_game(
 /// POST /games/:id/start
 /// Only works if 2+ players have joined
 async fn start_game(Path(id): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
-    let mut games = state.games.lock().unwrap();
+    let mut games = state.games.write().await;
 
     if let Some(game) = games.get_mut(&id) {
         match game.transition(GameEvent::StartGame, format!("system").as_str()) {
@@ -125,7 +125,7 @@ async fn get_game_state(
     Query(params): Query<PollQuery>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let games = state.games.lock().unwrap();
+    let games = state.games.read().await;
 
     if let Some(game) = games.get(&id) {
         let view = game.get_view_for_player(&params.player_id);
@@ -142,7 +142,7 @@ async fn play_move(
     State(state): State<AppState>,
     Json(payload): Json<MoveRequest>,
 ) -> impl IntoResponse {
-    let mut games = state.games.lock().unwrap();
+    let mut games = state.games.write().await;
 
     let game = match games.get_mut(&id) {
         Some(g) => g,
@@ -157,6 +157,7 @@ async fn play_move(
                 id.clone(),
                 game.phase.clone(),
                 game.current_player_idx,
+                game.last_move_ts, // <--- Pass the timestamp
             );
 
             (StatusCode::OK, "Move accepted").into_response()
@@ -166,42 +167,39 @@ async fn play_move(
 }
 
 // --- HELPER: RECURSIVE TIMER ---
-fn spawn_timer(state: AppState, game_id: String, phase: GamePhase, player_idx: usize) {
+fn spawn_timer(
+    state: AppState,
+    game_id: String,
+    phase: GamePhase,
+    player_idx: usize,
+    expected_ts: u64,
+) {
     let timeout_seconds = match phase {
         GamePhase::ExplosionPending { timer_seconds } => timer_seconds as u64,
         GamePhase::PlayerTurn => 45,
         _ => return, // No timer for other phases
     };
 
-    let target_phase_variant = std::mem::discriminant(&phase);
-
     tokio::spawn(async move {
         // 1. Wait patiently
         sleep(Duration::from_secs(timeout_seconds)).await;
 
-        let mut games = state.games.lock().unwrap();
+        let mut games = state.games.write().await;
         if let Some(bg_game) = games.get_mut(&game_id) {
-            let current_phase_variant = std::mem::discriminant(&bg_game.phase);
-
-            // 2. Validate nothing changed while we slept
-            if current_phase_variant == target_phase_variant
-                && bg_game.current_player_idx == player_idx
-            {
+            // Check if the timestamp is exactly the same as when we slept
+            if bg_game.last_move_ts == expected_ts {
                 println!(
                     "⏰ Timeout! Auto-playing for player {} in game {}",
                     player_idx, game_id
                 );
 
-                // 3. EXECUTE TIMEOUT
-                // Using "system" as actor bypasses basic ID checks
                 if let Ok(_) = bg_game.transition(GameEvent::TimerExpired, "system") {
-                    // 4. CHAIN REACTION
-                    // Spawn a NEW timer for the resulting state (infinite auto-play)
                     spawn_timer(
                         state.clone(),
                         game_id.clone(),
                         bg_game.phase.clone(),
                         bg_game.current_player_idx,
+                        bg_game.last_move_ts, // <--- Pass the new timestamp
                     );
                 }
             }

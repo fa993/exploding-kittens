@@ -3,16 +3,14 @@ mod game;
 
 use crate::game::engine::GameContext;
 use axum::Router;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile}; // Import these
 
 #[derive(Clone)]
 pub struct AppState {
-    pub games: Arc<Mutex<HashMap<String, GameContext>>>,
+    pub games: Arc<RwLock<HashMap<String, GameContext>>>,
 }
 
 #[tokio::main]
@@ -25,7 +23,7 @@ async fn main() {
     println!("Mounted at {base_path}");
 
     let state = AppState {
-        games: Arc::new(Mutex::new(HashMap::new())),
+        games: Arc::new(RwLock::new(HashMap::new())),
     };
 
     // 1. Define the Static File Service

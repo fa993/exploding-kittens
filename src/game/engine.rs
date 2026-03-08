@@ -156,14 +156,9 @@ impl GameContext {
             }
         }
 
-        // 2. UPDATE TIMESTAMP (Start of the "clock" for the next move)
-        let start = SystemTime::now();
-        let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
-        self.last_move_ts = since_epoch.as_millis() as u64;
-
         let current_phase = self.phase.clone();
 
-        match (current_phase, event) {
+        let result = match (current_phase, event) {
             // --- START ---
             (GamePhase::WaitingForPlayers, GameEvent::StartGame) => {
                 if self.players.len() < 2 {
@@ -415,7 +410,15 @@ impl GameContext {
 
             (GamePhase::GameOver { .. }, _) => Err("Game is over".into()),
             _ => Err("Invalid action for current phase".into()),
+        };
+
+        if result.is_ok() {
+            // 2. UPDATE TIMESTAMP (Start of the "clock" for the next move)
+            let start = SystemTime::now();
+            let since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+            self.last_move_ts = since_epoch.as_millis() as u64;
         }
+        result
     }
 
     // --- HELPERS ---
